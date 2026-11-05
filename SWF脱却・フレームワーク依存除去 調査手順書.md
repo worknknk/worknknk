@@ -9,7 +9,7 @@ Spring Web Flow（SWF）および Spring Framework 等が提供する機能を J
 | フェーズ | 内容 | 主体 | 成果物 |
 | --- | --- | --- | --- |
 | 0. 棚卸し | スクリプトでファイル分類・依存検出・調査単位の作成 | スクリプト | `_inventory/*.csv`、`_units/*.txt`、チェックリスト |
-| 1. パイロット | 小さな1単位で試行し、テンプレートと単位サイズを調整 | Codex＋人 | 調整済みの `TEMPLATE.md`・`$MaxLines` |
+| 1. パイロット | 分類ルールを確定させ、数単位で試行してテンプレート・依頼文・単位サイズを調整 | スクリプト＋Codex＋人 | 確定した設定・`TEMPLATE.md`・依頼文、`pilot-log.md` |
 | 2. 共通基盤調査 | `common` レイヤを先に調査し、要約を作る | Codex | `results/common-*.md`、`common-summary.md` |
 | 3. 単位別調査 | 残りのレイヤを単位ごとに調査 | Codex | `results/<単位ID>.md` |
 | 4. 縦調査 | 代表フローを選び、flow定義を起点に関連ファイルを機械抽出して横断的に追う | スクリプト＋Codex＋人 | `results/vertical-<プロジェクト>-<フロー名>.md` |
@@ -317,9 +317,23 @@ function Get-JdepsEdges([string]$path) {
   - 共通定義は survey-settings.ps1、共通処理は survey-common.ps1（同じフォルダに置く）
   - PowerShell 5.1 / 7 で動作。UTF-8 (BOM付き) で保存すること
   実行例: powershell -ExecutionPolicy Bypass -File .\survey-inventory.ps1
+  ※ 実行のたびに _inventory、_units、survey-checklist.md を作り直す（前回の出力は残らない）
+  ※ results に調査結果がある場合は、調査単位がずれるのを防ぐため中止する（-Force で強制実行）
 #>
+param([switch]$Force)
 . (Join-Path $PSScriptRoot 'survey-common.ps1')
 
+# 本調査の開始後に誤って再実行しないための確認
+$existing = @(Get-ChildItem $ResultDir -Filter *.md -ErrorAction SilentlyContinue)
+if ($existing.Count -gt 0 -and -not $Force) {
+  Write-Warning ('results に調査結果が {0} 件あります。再実行すると調査単位の区切りが変わる可能性があるため中止しました。再実行する場合は -Force を付けてください。' -f $existing.Count)
+  return
+}
+
+# 前回の出力を削除して作り直す（調整を繰り返しても古いファイルが残らないようにする）
+foreach ($d in $InvDir, $UnitDir) { if (Test-Path $d) { Remove-Item $d -Recurse -Force } }
+$checklist = Join-Path $SurveyDir 'survey-checklist.md'
+if (Test-Path $checklist) { Remove-Item $checklist -Force }
 foreach ($d in $InvDir, $UnitDir, $ResultDir) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 
 # ---------- Step 1: ファイル一覧とレイヤの機械分類（全プロジェクト） ----------
@@ -508,7 +522,7 @@ foreach ($u in $units) {
   $md += ('| 未着手 | {0} | {1} | {2} | {3} | {4} | {5} | {6} | results/{0}.md |' -f `
     $u.UnitId, $u.Project, $u.Layer, $u.Files, $u.Lines, $u.MinDepth, $u.FirstDir)
 }
-$md | Out-File (Join-Path $SurveyDir 'survey-checklist.md') -Encoding UTF8
+$md | Out-File $checklist -Encoding UTF8
 
 Write-Host ('完了: 全ファイル {0} / 調査対象 {1} / 調査単位 {2}（上限超過 {3}）' -f `
   $inventory.Count, $targets.Count, $units.Count, @($units | Where-Object OverLimit).Count)
@@ -538,7 +552,7 @@ Codex CLI は起動したフォルダの `AGENTS.md` を毎回読み込みます
 
 ## 現在のフェーズ：調査（コード変更禁止）
 - ソースコード・設定ファイルを変更してはならない。
-- 書き込んでよいのは survey/results/ と survey/summary/ 配下のみ。
+- 書き込んでよいのは survey/results/、survey/summary/、survey/pilot/ 配下のみ（依頼で出力先が指定された場合はそれに従う）。
 - 依頼で指定された一覧ファイル（survey/_units/<調査単位ID>.txt）に記載されたファイル以外は開かない。
   - 他のファイルの内容が必要と思われる場合は、開かずに「要確認事項」に記録する。
   - 例外として survey/results/common-summary.md と survey/TEMPLATE.md は参照してよい。
@@ -582,12 +596,83 @@ codex exec --sandbox workspace-write "調査単位 project-a-action-001 を調�
 
 ### 5.2 フェーズ1：パイロット
 
-小さめの単位（例：ファイル数の少ない flow 単位）を1つ選んで試し、次の点を確認します。
+パイロットの目的は、本調査に入る前に「設定・テンプレート・依頼文・単位サイズ」を確定させることです。調整を繰り返してもフォルダが散らからないよう、次の2つのルールで進めます。
 
-- 指定したファイル以外を開いていないか（Codex の実行ログで確認）
-- トークン上限に達せずに完了したか。余裕があるようなら `$MaxLines` を引き上げます。
-- 出力の粒度は、集約に使える程度に揃っているか。足りない項目や不要な項目があれば `TEMPLATE.md` を修正します。
-- 確信度「低」の記述が多すぎないか。多い場合は単位が小さすぎて文脈が足りない可能性があります。
+- **棚卸しの出力は常に最新の1組だけ**：`survey-inventory.ps1` は実行のたびに `_inventory`、`_units`、`survey-checklist.md` を削除して作り直すため、何度再実行しても古いファイルは残りません。
+- **試行の結果は `survey/pilot` にまとめる**：Codex の試行結果は回ごとのフォルダ（`round1`、`round2`…）に出力し、パイロット終了時にフォルダごと削除します。残すのは調整内容を記録した `survey/pilot-log.md` だけです。
+
+```
+survey\
+├─ pilot\                … パイロット終了時にフォルダごと削除
+│   ├─ round1\            1回目の試行結果
+│   └─ round2\            2回目の試行結果
+└─ pilot-log.md          … 何を変えたか・なぜ変えたかの記録（残す）
+```
+
+`results` フォルダはパイロット中は空のままにします。`results` に調査結果が入ると、棚卸しスクリプトは調査単位のずれを防ぐため実行を中止します（`-Force` で強制実行は可能）。この仕組みにより、パイロット中は自由に再実行でき、本調査の開始後は誤って再実行することを防げます。
+
+#### ステップ1：分類ルールの確定（Codex は使わない）
+
+棚卸しスクリプトだけを繰り返し実行し、3.5節の観点で `inventory.csv` と `units.csv` を確認しながら、`survey-settings.ps1` の分類ルールと除外フォルダを調整します。Codex を使わないためトークンを消費せず、何度でも試せます。`Layer` が `other` のファイルがほぼなくなり、調査単位の数と大きさに違和感がなくなれば完了です。
+
+#### ステップ2：試行する単位を選ぶ
+
+`units.csv` から、性質の異なる単位を2〜3個選びます。
+
+| 選ぶ単位 | 確認したいこと |
+| --- | --- |
+| 共通基盤の単位を1つ | 要約（common-summary.md）が後続で使える粒度になるか |
+| 行数が上限に近い単位を1つ | トークン上限に余裕を持って完了するか |
+| flow または view の小さい単位を1つ | 他レイヤへの影響メモがキー付きで書かれるか |
+
+#### ステップ3：試行と評価
+
+選んだ単位を、5.3節の依頼文で実行します。出力先だけ次のように変えます。
+
+```
+出力先: survey/pilot/round1/{単位ID}.md（TEMPLATE.md の形式）
+```
+
+共通基盤の単位では、要約の出力先も `survey/pilot/round1/common-summary.md` に変えます。
+
+終わったら、次の観点で評価します。
+
+| 観点 | 確認方法 | 合格の目安 |
+| --- | --- | --- |
+| 指定範囲外のファイルを開いていないか | Codex の実行ログ | 一覧ファイルと共通要約以外を開いていない |
+| トークンに余裕があるか | Codex の画面に表示されるコンテキストの使用量 | 完了時点で半分程度に収まっている |
+| テンプレートの形式を守っているか | 影響メモを機械集約できるか試す（下記） | 全件が集約され、キー種別が既定の値になっている |
+| 粒度は適切か | 結果を読む | 置き換え方針が具体的で、確信度「低」が多すぎない |
+| ソースを変更していないか | 各プロジェクトの `git status` | 変更なし |
+
+影響メモの集約は、試行結果のフォルダを指定して確認できます。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\collect-impacts.ps1 -Dir 'C:\work\survey\pilot\round1'
+```
+
+#### ステップ4：調整と再試行
+
+評価で見つかった問題に応じて、次のように調整します。
+
+| 問題 | 調整先 |
+| --- | --- |
+| 範囲外のファイルを開く | `AGENTS.md` のルールを強める、依頼文で禁止事項を明示する |
+| トークンが足りない／余りすぎる | `$MaxLines` を変更し、棚卸しを再実行する |
+| 形式が崩れる、項目が足りない | `TEMPLATE.md` を修正する |
+| 観点が漏れる、粒度がばらつく | 依頼文の「観点」を修正する |
+
+調整したら、変更内容と理由を `pilot-log.md` に1〜2行で記録し、同じ単位を次の回（`round2`）で実行して比較します。同じ単位で比べることで、調整の効果を判断できます。通常は2〜3回で収束します。
+
+#### ステップ5：確定と後片付け
+
+すべての観点が合格の目安を満たしたら、パイロットを終了します。
+
+1. `survey/pilot` フォルダを削除します（`pilot-log.md` は残します）。
+2. 確定した設定で棚卸しを1回だけ実行します。
+3. 設定・`TEMPLATE.md`・`AGENTS.md`・依頼文が確定版であることを確認し、以降は変更しません（survey を Git で管理している場合はここでコミットします）。
+
+パイロットで作成した調査結果は、テンプレートが途中で変わっているため本調査には流用しません。本調査では、共通基盤の単位から改めて実行します。
 
 ### 5.3 依頼文テンプレート
 
@@ -1022,11 +1107,14 @@ if ($total -gt $MaxLines) {
   collect-impacts.ps1
   各調査結果ファイルの「他レイヤへの影響」表を1つのCSVに集約する（集約フェーズ）
   共通定義は survey-settings.ps1、共通処理は survey-common.ps1（同じフォルダに置く）。UTF-8 (BOM付き) で保存すること
+  パイロットの結果を確認する場合: .\collect-impacts.ps1 -Dir 'C:\work\survey\pilot\round1'
 #>
+param([string]$Dir = '')
 . (Join-Path $PSScriptRoot 'survey-common.ps1')
-$OutCsv = Join-Path $InvDir 'cross_layer_impacts.csv'
+if ($Dir) { $SourceDir = $Dir; $OutCsv = Join-Path $Dir 'cross_layer_impacts.csv' }
+else      { $SourceDir = $ResultDir; $OutCsv = Join-Path $InvDir 'cross_layer_impacts.csv' }
 
-$rows = @(foreach ($f in Get-ChildItem $ResultDir -Filter *.md) {
+$rows = @(foreach ($f in Get-ChildItem $SourceDir -Filter *.md) {
   $in = $false
   foreach ($line in [System.IO.File]::ReadAllLines($f.FullName, [System.Text.Encoding]::UTF8)) {
     if ($line -match '^##\s*他レイヤへの影響') { $in = $true; continue }
@@ -1090,5 +1178,5 @@ survey/policy-draft.md に修正方針案を作成してください。
 
 - AI の出力には推測が含まれます。確信度「低」と「要確認事項」は、必ず人が確認してください。
 - 指定範囲外のファイルを読んでいないか、ソースを変更していないかを、ログと各プロジェクトの `git status` で毎回確認してください。
-- 分類ルールや単位サイズは、一度で決めようとせず、パイロットの結果を見て調整してください。
+- 分類ルールや単位サイズは、一度で決めようとせず、パイロットの結果を見て調整してください。本調査の開始後は、棚卸しの再実行や設定の変更は行わないでください。
 - 結果ファイルにソースを大量に転記させないでください。集約時のトークンを圧迫します。

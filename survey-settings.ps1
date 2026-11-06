@@ -1,4 +1,4 @@
-﻿<#
+<#
   survey-settings.ps1
   調査スクリプトの共通定義（環境・ルールに関する設定はすべてここに集約）
   survey-common.ps1 から読み込まれる。UTF-8 (BOM付き) で保存すること
@@ -74,9 +74,18 @@ $LayerRules = [ordered]@{
 $LayerOrder = @{ common=1; config=2; flow=3; action=4; view=5; js=6; service=7; dao=8; other=9 }
 
 # 直接参照として検出するキーワード（正規表現）
+#   自社パッケージ名に含まれる文字列（webflow 等）を単独で指定すると import 文に誤検出するため、
+#   SWF の機能はクラス名・タグ名・予約語など具体的な文字列で指定する
 $Keywords = @(
-  'springframework','webflow',
-  'flowScope','conversationScope','flashScope','viewScope','flowExecutionUrl','flowExecutionKey','_eventId',
+  # Spring 全般（Java の import 文、XML の名前空間・スキーマURL を含む）
+  'springframework',
+  # SWF の設定（webflow-config 名前空間のタグ、Spring MVC との連携クラス）
+  'webflow:','flow-registry','flow-executor','flow-builder-services','flow-location',
+  'FlowHandlerAdapter','FlowHandlerMapping','FlowExecutor','FlowDefinitionRegistry','FlowExecutionListener','MvcViewFactoryCreator',
+  # SWF のフロー定義（状態・リダイレクト指定）
+  '<view-state','<action-state','<decision-state','<subflow-state','<end-state','flowRedirect:','externalRedirect:',
+  # SWF のスコープ・実行コンテキスト（JSP・Java・フロー定義での参照）
+  'flowScope','conversationScope','flashScope','viewScope','flowRequestContext','flowExecutionUrl','flowExecutionKey','_eventId',
   '<form:','<spring:',
   '@Autowired','@Resource','@Transactional','@Controller','@Service','@Repository','@Component','@Value',
   'MessageSource','JdbcTemplate','DispatcherServlet','ContextLoaderListener','DelegatingFilterProxy'
@@ -105,3 +114,22 @@ $ViewCandidates = @(
 $Reserved = @('flowScope','viewScope','requestScope','flashScope','conversationScope','flowRequestContext',
   'flowExecutionContext','externalContext','requestParameters','currentEvent','messageContext',
   'resourceBundle','currentUser','flowExecutionUrl','currentState','this','null','true','false')
+
+# =====================================================================
+# 4. 一括実行（run-units.ps1）
+# =====================================================================
+# Codex CLI の実行コマンドと引数（$WorkRoot で実行される）
+#   Gitリポジトリ外での実行を拒否される場合は '--skip-git-repo-check' を追加する
+$CodexCommand = 'codex'
+$CodexArgs    = @('exec', '--sandbox', 'workspace-write')
+
+# 単位と単位の間の待ち時間（秒）。TPM制限を避けるため
+$WaitBetweenUnits = 60
+# レート制限で失敗したときの待ち時間（秒）と再試行回数
+$RateLimitWait    = 180
+$RateLimitRetry   = 5
+# 出力を「レート制限による失敗」と判定する文字列（正規表現）
+$RateLimitPattern = 'rate limit|429|Too Many Requests'
+
+# 調査結果に必須の見出し（欠けていれば失敗扱いにして再実行対象にする）
+$RequiredHeadings = @('## 利用しているフレームワーク機能', '## 置き換え方針案', '## 他レイヤへの影響', '## 要確認事項')

@@ -44,8 +44,10 @@ C:\work\                      … $WorkRoot（Codex CLI の起動場所）
 ├─ project-b\
 ├─ common-lib\
 └─ survey\                   … 調査関連はすべてここ
-   ├─ tools\                 … スクリプト5本を置く場所
-   ├─ TEMPLATE.md              … 調査結果のテンプレート（6章の内容を保存）
+   ├─ tools\                 … スクリプト6本を置く場所
+   ├─ TEMPLATE.md              … 調査結果のテンプレート（6.1節の内容を保存）
+   ├─ TEMPLATE-common-summary.md … 共通基盤要約のテンプレート（6.2節の内容を保存）
+   ├─ prompts\                … 一括実行用の依頼文（5.4節）
    ├─ survey-checklist.md      … 進捗管理（自動生成）
    ├─ _inventory\              … 棚卸し結果（自動生成）
    │   ├─ inventory.csv            全ファイルの分類・行数・段階数（Project列あり）
@@ -58,6 +60,7 @@ C:\work\                      … $WorkRoot（Codex CLI の起動場所）
    │   └─ cross_layer_impacts.csv  影響メモの集約結果（8章）
    ├─ _units\                  … 各調査単位の対象ファイル一覧、縦調査のヒント
    ├─ results\                 … Codex が書く調査結果
+   ├─ _logs\                   … 一括実行のログ、不完全だった結果の退避先
    └─ summary\                 … 集約結果
 ```
 
@@ -88,9 +91,14 @@ C:\work\                      … $WorkRoot（Codex CLI の起動場所）
 
 そこで、次の順に進めます。
 
-1. `common` レイヤを最初に調査します。
-2. その結果を `results/common-summary.md` に要約します。内容は、クラスごとの役割、使っている Spring/SWF の機能、業務側に提供している API です。
-3. 以降の単位では、共通基盤のソースではなくこの要約だけを参照させます。
+1. テンプレート（6.2節）を `results/common-summary.md` としてコピーしてから、`common` レイヤを最初に調査します。
+2. 共通基盤の各単位の調査で、要約の表に行を追加させます。内容は、クラスごとの役割、使っている Spring/SWF の機能、業務側に提供しているもの、業務クラスからは見えない暗黙の動作です。
+3. 共通基盤の単位がすべて終わったら、人が要約を確認・修正します。全単位がこの要約を前提に調査するため、ここでの誤りは全結果に波及します。
+4. 以降の単位では、共通基盤のソースではなくこの要約だけを参照させます。
+
+```powershell
+Copy-Item C:\work\survey\TEMPLATE-common-summary.md C:\work\survey\results\common-summary.md
+```
 
 ユーティリティのうち Spring に依存していないもの（段階数が空欄のもの）は、調査対象から自動的に外れます。
 
@@ -119,7 +127,7 @@ C:\work\                      … $WorkRoot（Codex CLI の起動場所）
 
 ### 3.1 実行手順
 
-1. 本書のスクリプト5本（`survey-settings.ps1`、`survey-common.ps1`、`survey-inventory.ps1`、`extract-flow-files.ps1`、`collect-impacts.ps1`）を、同じフォルダ（例：`C:\work\survey\tools`）に **UTF-8（BOM付き）** で保存します。PowerShell 5.1 では BOM がないと日本語が文字化けし、スクリプトが正しく動きません。
+1. 本書のスクリプト6本（`survey-settings.ps1`、`survey-common.ps1`、`survey-inventory.ps1`、`run-units.ps1`、`extract-flow-files.ps1`、`collect-impacts.ps1`）を、同じフォルダ（例：`C:\work\survey\tools`）に **UTF-8（BOM付き）** で保存します。PowerShell 5.1 では BOM がないと日本語が文字化けし、スクリプトが正しく動きません。
 2. `survey-settings.ps1` の `$WorkRoot`、`$ProjectNames`（プロジェクト名のリスト）、`$AppPackages` を環境に合わせて変更します。フォルダ構成が既定値（`src\main\java` など）と異なるプロジェクトだけ、`$ProjectOverrides` に差分を書きます。分類ルールなどの調整もすべてこのファイルで行い、他のスクリプトを編集する必要はありません。
 3. 各プロジェクトをビルドし、class ファイルを用意します。
 4. 次のコマンドで実行します。ファイル検索では `target`、`build`、`bin`、`.git` などのフォルダには一切入りません（`$ExcludeDirNames` で変更可）。`target\classes` は jdeps の解析にのみ使用します。
@@ -212,8 +220,11 @@ $LayerRules = [ordered]@{
 $LayerOrder = @{ common=1; config=2; flow=3; action=4; view=5; js=6; service=7; dao=8; other=9 }
 
 # 直接参照として検出するキーワード（正規表現）
+#   webflow は自社パッケージ名に含まれるため単独では指定しない。
+#   SWF の import 文・XML の名前空間・クラス指定は springframework で、
+#   設定XMLの名前空間接頭辞付きタグ（<webflow:flow-registry> 等）は webflow: で検出する
 $Keywords = @(
-  'springframework','webflow',
+  'springframework','webflow:',
   'flowScope','conversationScope','flashScope','viewScope','flowExecutionUrl','flowExecutionKey','_eventId',
   '<form:','<spring:',
   '@Autowired','@Resource','@Transactional','@Controller','@Service','@Repository','@Component','@Value',
@@ -243,6 +254,25 @@ $ViewCandidates = @(
 $Reserved = @('flowScope','viewScope','requestScope','flashScope','conversationScope','flowRequestContext',
   'flowExecutionContext','externalContext','requestParameters','currentEvent','messageContext',
   'resourceBundle','currentUser','flowExecutionUrl','currentState','this','null','true','false')
+
+# =====================================================================
+# 4. 一括実行（run-units.ps1）
+# =====================================================================
+# Codex CLI の実行コマンドと引数（$WorkRoot で実行される）
+#   Gitリポジトリ外での実行を拒否される場合は '--skip-git-repo-check' を追加する
+$CodexCommand = 'codex'
+$CodexArgs    = @('exec', '--sandbox', 'workspace-write')
+
+# 単位と単位の間の待ち時間（秒）。TPM制限を避けるため
+$WaitBetweenUnits = 60
+# レート制限で失敗したときの待ち時間（秒）と再試行回数
+$RateLimitWait    = 180
+$RateLimitRetry   = 5
+# 出力を「レート制限による失敗」と判定する文字列（正規表現）
+$RateLimitPattern = 'rate limit|429|Too Many Requests'
+
+# 調査結果に必須の見出し（欠けていれば失敗扱いにして再実行対象にする）
+$RequiredHeadings = @('## 利用しているフレームワーク機能', '## 置き換え方針案', '## 他レイヤへの影響', '## 要確認事項')
 ```
 
 ### 3.3 共通処理（survey-common.ps1）
@@ -534,6 +564,7 @@ Write-Host ('完了: 全ファイル {0} / 調査対象 {1} / 調査単位 {2}�
 
 - `Layer` が `other` のファイルが多くないか。多い場合は `$LayerRules` を追加・修正します。`Dir` 列でフィルタすると、どのフォルダがどのレイヤに分類されたかを確認しやすくなります。
 - 除外すべきフォルダ（生成物、バックアップ、旧版ソースなど）が含まれていないか。あれば `$ExcludeDirNames` に追加します。
+- `direct_refs.csv` に自社のパッケージ名やクラス名への一致が混ざっていないか。`Keyword` 列で集計し、誤検出の多いキーワードは、クラス名・タグ名など具体的な文字列に置き換えます（例：自社パッケージ名に含まれる `webflow` は単独で指定せず、`webflow:` で指定する）。
 - 共通 JSP（ヘッダー等）が `common` に入っているか。意図と違う場合はルールの順序を調整します。
 - `units.csv` で `OverLimit` が True の単位がないか。これは単独ファイルが上限を超えるケースです。巨大クラスは個別に扱うか、上限を引き上げます。
 - `spring_dependents.csv` で段階数が大きくなっている経路。`Via` 列をたどると、どの基底クラスを経由して依存が広がっているかが分かります。段階 1 以上のクラスが大量にある場合、共通基盤の置き換えだけで済む可能性があります。
@@ -555,7 +586,7 @@ Codex CLI は起動したフォルダの `AGENTS.md` を毎回読み込みます
 - 書き込んでよいのは survey/results/、survey/summary/、survey/pilot/ 配下のみ（依頼で出力先が指定された場合はそれに従う）。
 - 依頼で指定された一覧ファイル（survey/_units/<調査単位ID>.txt）に記載されたファイル以外は開かない。
   - 他のファイルの内容が必要と思われる場合は、開かずに「要確認事項」に記録する。
-  - 例外として survey/results/common-summary.md と survey/TEMPLATE.md は参照してよい。
+  - 例外として survey/results/common-summary.md、survey/TEMPLATE.md、survey/TEMPLATE-common-summary.md、survey/prompts/ 配下は参照してよい。
 - 出力は survey/TEMPLATE.md の形式に従い、日本語で記述する。
 - ソースコードの引用は1箇所10行以内とし、ファイルパスと行番号で位置を示す。
 - 推測を含む記述には確信度（高/中/低）を付ける。
@@ -633,7 +664,7 @@ survey\
 出力先: survey/pilot/round1/{単位ID}.md（TEMPLATE.md の形式）
 ```
 
-共通基盤の単位では、要約の出力先も `survey/pilot/round1/common-summary.md` に変えます。
+共通基盤の単位では、要約の出力先も `survey/pilot/round1/common-summary.md` に変えます。事前にテンプレートをこのフォルダへコピーしておき、要約が後続の単位で使えるか（業務側での見え方が具体的に書かれているか、分量が多すぎないか）も評価します。
 
 終わったら、次の観点で評価します。
 
@@ -689,8 +720,11 @@ powershell -ExecutionPolicy Bypass -File .\collect-impacts.ps1 -Dir 'C:\work\sur
 3. Java標準で置き換える場合の方針案と難易度
 4. 他レイヤへの影響（キー種別とキー値を必ず記載）
 
-最後に、survey/results/common-summary.md に、このクラス群の要約
-（クラス名／役割／利用しているSpring機能／業務側に提供しているAPI）を1クラス3行以内で追記してください。
+最後に、survey/results/common-summary.md（TEMPLATE-common-summary.md の形式）の該当する表に、
+このクラス群の行を追加してください。
+- 既存の行は変更・削除しないこと
+- 各セルは1文以内で簡潔に書くこと
+- 業務クラスのコードだけを見ても分からない暗黙の動作は、必ず「3. 後続の調査への注意」に書くこと
 ```
 
 **通常の単位用**
@@ -708,9 +742,239 @@ powershell -ExecutionPolicy Bypass -File .\collect-impacts.ps1 -Dir 'C:\work\sur
 4. 判断できなかった点
 ```
 
+### 5.4 一括実行（run-units.ps1）
+
+調査単位が数十〜100個になると、手作業で1つずつ実行するのは現実的ではありません。`run-units.ps1` は、未着手の単位を Codex CLI で1つずつ順番に自動実行します。
+
+**主な動作**
+
+- **順番に1単位ずつ実行**：TPM 制限を避けるため並行実行はせず、単位の間に待ち時間（`$WaitBetweenUnits`）を入れます。
+- **レート制限時は待って再実行**：出力にレート制限のエラーが含まれていれば、`$RateLimitWait` 秒待って同じ単位を再実行します。
+- **結果の形式を確認**：結果ファイルに必須の見出しがない場合は失敗とし、不完全な結果を `_logs` に退避して再実行の対象に戻します。
+- **ソースの無変更を確認**：各単位の後に全プロジェクトの `git status` を実行前と比較し、変化があれば即座に停止します。
+- **中断しても再開できる**：結果ファイルがある単位はスキップするため、途中で止まっても再実行すれば続きから再開します。
+- **進捗を記録**：`survey-checklist.md` の状態欄を「実行中／完了／失敗／要確認」に更新します。
+
+#### 依頼文ファイルの準備
+
+5.3節の依頼文を、単位IDの部分を一般化して `survey/prompts/` に保存します。スクリプトは「`survey/prompts/unit.md` を読み、その指示に従って調査単位 ○○ を調査してください」という短い依頼だけを Codex に渡します。長い依頼文をコマンドの引数で渡さないため、文字化けや引用符の問題が起きません。
+
+`survey/prompts/common.md`（共通基盤用）
+
+```
+依頼文で指定された調査単位IDを、以下 {単位ID} と表記する。
+
+対象ファイル: survey/_units/{単位ID}.txt に記載されたファイルのみ
+出力先: survey/results/{単位ID}.md（survey/TEMPLATE.md の形式）
+
+観点:
+1. 各クラスの役割と、利用している Spring/SWF の機能
+2. 業務クラスに提供している機能・API（継承されるメソッド、ユーティリティメソッド等）
+3. Java標準で置き換える場合の方針案と難易度
+4. 他レイヤへの影響（キー種別とキー値を必ず記載）
+
+最後に、survey/results/common-summary.md（survey/TEMPLATE-common-summary.md の形式）の該当する表に、
+このクラス群の行を追加すること。
+- 既存の行は変更・削除しない
+- 各セルは1文以内で簡潔に書く
+- 業務クラスのコードだけを見ても分からない暗黙の動作は、必ず「3. 後続の調査への注意」に書く
+
+一度読んだファイルは再度開かないこと。
+```
+
+`survey/prompts/unit.md`（通常の単位用）
+
+```
+依頼文で指定された調査単位IDを、以下 {単位ID} と表記する。
+
+対象ファイル: survey/_units/{単位ID}.txt に記載されたファイルのみ
+共通基盤の情報: survey/results/common-summary.md を参照（共通基盤のソースは開かない）
+出力先: survey/results/{単位ID}.md（survey/TEMPLATE.md の形式）
+
+観点:
+1. 使用している Spring/SWF の機能（直接の利用、および共通基盤を経由した間接的な利用）
+2. Java標準で置き換える場合の方針案と難易度
+3. 他レイヤ・他単位への影響（キー種別とキー値を必ず記載）
+4. 判断できなかった点
+
+一度読んだファイルは再度開かないこと。
+```
+
+設定は `survey-settings.ps1` の「4. 一括実行」にあります。Git リポジトリ外での実行を拒否される場合は、`$CodexArgs` にオプションを追加してください（1.3節参照）。
+
+#### 進め方
+
+100単位前後を、次の4段階で進めます。各段階の間に人の確認を挟むことで、問題があったときに大量のやり直しが発生するのを防ぎます。
+
+1. **共通基盤だけを実行し、要約を確認する**
+
+```powershell
+.\run-units.ps1 -Layer common
+```
+
+全単位の前提になる `common-summary.md` を人が確認・修正します。ここが最も重要な確認ポイントです。
+
+2. **共通基盤以外を数単位だけ実行し、品質を確認する**
+
+```powershell
+.\run-units.ps1 -Max 5
+```
+
+要約を前提にした調査が期待どおりの品質か（共通基盤経由の依存を認識できているか、影響メモにキーが書かれているか）を確認します。問題があれば、この段階で依頼文を直します。この時点ではまだ数単位しか実行していないので、作り直しても影響は小さく済みます。
+
+3. **残りをまとめて実行する**
+
+```powershell
+.\run-units.ps1
+```
+
+夜間など、人が操作しない時間に実行しておくと効率的です。所要時間は単位あたりの処理時間と待ち時間で決まるため、1〜2の段階で実測した時間から見積もってください。
+
+4. **失敗した単位を確認し、再実行する** チェックリストで「失敗」になった単位のログを確認します。一時的なエラーであれば、そのまま `.\run-units.ps1` を再実行すれば失敗した単位だけが実行されます。同じ単位が繰り返し失敗する場合は、単位が大きすぎる可能性があるので、ログを見て個別に対応します。
+
+実行前に対象を確認したい場合は、`-DryRun` を付けると、実行せずに対象の単位を一覧表示します。
+
+#### スクリプト（run-units.ps1）
+
+```powershell
+<#
+  run-units.ps1
+  チェックリストの未着手の調査単位を、Codex CLI で1つずつ順番に自動実行する
+  - 結果ファイルがある単位はスキップするため、中断しても再実行すれば続きから再開できる
+  - 各単位の後に、結果の形式とソースの無変更を確認し、問題があれば停止する
+  共通定義は survey-settings.ps1、共通処理は survey-common.ps1（同じフォルダに置く）。UTF-8 (BOM付き) で保存すること
+
+  使い方:
+    共通基盤だけ実行         : .\run-units.ps1 -Layer common
+    共通基盤以外を5単位だけ  : .\run-units.ps1 -Max 5
+    残りをすべて実行         : .\run-units.ps1
+    実行予定の確認のみ       : .\run-units.ps1 -DryRun
+#>
+param(
+  [string[]]$Layer = @(),     # 対象レイヤを限定する（省略時は全レイヤ）
+  [int]$Max = 0,              # 実行する単位数の上限（0 は無制限）
+  [switch]$DryRun             # 実行せず、対象の単位を表示するだけ
+)
+. (Join-Path $PSScriptRoot 'survey-common.ps1')
+
+$LogDir      = Join-Path $SurveyDir '_logs'
+$PromptDir   = Join-Path $SurveyDir 'prompts'
+$Checklist   = Join-Path $SurveyDir 'survey-checklist.md'
+$SummaryPath = Join-Path $ResultDir 'common-summary.md'
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+# ---------- 事前チェック ----------
+foreach ($f in (Join-Path $PromptDir 'common.md'), (Join-Path $PromptDir 'unit.md')) {
+  if (-not (Test-Path $f)) { Write-Error "依頼文ファイルがありません: $f"; return }
+}
+# 各プロジェクトのGitの状態を記録（実行前との差分でソース変更を検知する）
+function Get-RepoState {
+  $state = @{}
+  foreach ($p in $Projects) {
+    $dir = Join-Path $RootTrim $p.Name
+    if (Test-Path (Join-Path $dir '.git')) { $state[$p.Name] = (& git -C $dir status --porcelain) -join "`n" }
+  }
+  $state
+}
+$baseline = Get-RepoState
+
+# チェックリストの状態欄を更新
+function Set-Status([string]$unitId, [string]$status) {
+  if (-not (Test-Path $Checklist)) { return }
+  $pattern = '^\|\s*[^|]*\|\s*' + [regex]::Escape($unitId) + '\s*\|'
+  $lines = [System.IO.File]::ReadAllLines($Checklist, [System.Text.Encoding]::UTF8)
+  for ($n = 0; $n -lt $lines.Length; $n++) {
+    if ($lines[$n] -match $pattern) { $lines[$n] = $lines[$n] -replace '^\|\s*[^|]*\|', "| $status |" }
+  }
+  [System.IO.File]::WriteAllLines($Checklist, $lines, (New-Object System.Text.UTF8Encoding $true))
+}
+
+# ---------- 対象の単位 ----------
+$units = @(Import-Csv (Join-Path $InvDir 'units.csv') | Sort-Object { [int]$_.Order }, UnitId)
+if ($Layer.Count -gt 0) { $units = @($units | Where-Object { $Layer -contains $_.Layer }) }
+$todo = @($units | Where-Object { -not (Test-Path (Join-Path $ResultDir ($_.UnitId + '.md'))) })
+if ($Max -gt 0) { $todo = @($todo | Select-Object -First $Max) }
+
+Write-Host ('対象 {0} 単位（うち完了済み {1}）→ 今回の実行 {2} 単位' -f $units.Count, ($units.Count - @($units | Where-Object { -not (Test-Path (Join-Path $ResultDir ($_.UnitId + '.md'))) }).Count), $todo.Count)
+if ($DryRun) {
+  foreach ($u in $todo) { Write-Host ('  {0}  レイヤ={1}  ファイル={2}  行数={3}' -f $u.UnitId, $u.Layer, $u.Files, $u.Lines) }
+  return
+}
+
+if (-not (Test-Path $SummaryPath)) {
+  Copy-Item (Join-Path $SurveyDir 'TEMPLATE-common-summary.md') $SummaryPath
+  Write-Host '共通基盤の要約ファイルをテンプレートから作成しました'
+}
+
+# ---------- 実行 ----------
+$done = 0
+Push-Location $RootTrim
+try {
+  foreach ($u in $todo) {
+    $id = $u.UnitId
+    $promptFile = if ($u.Layer -eq 'common') { 'survey/prompts/common.md' } else { 'survey/prompts/unit.md' }
+    $prompt = "$promptFile を読み、その指示に従って調査単位 $id を調査してください。"
+    $resultPath = Join-Path $ResultDir ($id + '.md')
+
+    $success = $false
+    for ($try = 1; $try -le $RateLimitRetry + 1; $try++) {
+      $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+      $log = Join-Path $LogDir "$id-$stamp.log"
+      Write-Host ('[{0}] {1} を実行中（{2}回目）...' -f (Get-Date -Format 'HH:mm:ss'), $id, $try)
+      Set-Status $id '実行中'
+
+      & $CodexCommand @CodexArgs $prompt 2>&1 | ForEach-Object { "$_" } | Out-File $log -Encoding UTF8
+      $exit = $LASTEXITCODE
+      $logText = [System.IO.File]::ReadAllText($log)
+
+      # ソースが変更されていないか
+      $now = Get-RepoState
+      $changed = @($now.Keys | Where-Object { $now[$_] -ne $baseline[$_] })
+      if ($changed.Count -gt 0) {
+        Set-Status $id '要確認'
+        Write-Error ("ソースの変更を検知したため停止しました: {0}（ログ: {1}）" -f ($changed -join ', '), $log)
+        return
+      }
+
+      # 結果ファイルの形式
+      $missing = @()
+      if (Test-Path $resultPath) {
+        $text = [System.IO.File]::ReadAllText($resultPath, [System.Text.Encoding]::UTF8)
+        $missing = @($RequiredHeadings | Where-Object { -not $text.Contains($_) })
+      }
+      if ($exit -eq 0 -and (Test-Path $resultPath) -and $missing.Count -eq 0) { $success = $true; break }
+
+      # 不完全な結果は退避して、次回の再実行対象に戻す
+      if (Test-Path $resultPath) { Move-Item $resultPath (Join-Path $LogDir "$id-$stamp.incomplete.md") -Force }
+
+      if ($logText -match $RateLimitPattern -and $try -le $RateLimitRetry) {
+        Write-Warning "レート制限のため $RateLimitWait 秒待って再実行します"
+        Start-Sleep -Seconds $RateLimitWait
+        continue
+      }
+      break
+    }
+
+    if ($success) {
+      Set-Status $id '完了'; $done++
+      Write-Host "  完了: $id"
+    } else {
+      Set-Status $id '失敗'
+      Write-Warning "  失敗: $id（ログ: $log）。次の単位に進みます"
+    }
+    Start-Sleep -Seconds $WaitBetweenUnits
+  }
+} finally {
+  Pop-Location
+}
+Write-Host ('終了: {0} / {1} 単位が完了しました' -f $done, $todo.Count)
+```
+
 ---
 
-## 6. 調査結果テンプレート（TEMPLATE.md）
+## 6. テンプレート
+
+### 6.1 調査結果テンプレート（TEMPLATE.md）
 
 `survey/TEMPLATE.md` として保存します。見出しの文言は集約スクリプトが参照するため、変更しないでください。
 
@@ -739,6 +1003,40 @@ powershell -ExecutionPolicy Bypass -File .\collect-impacts.ps1 -Dir 'C:\work\sur
 
 ## 要確認事項
 （指定範囲外のため確認できなかった点、判断に迷った点）
+```
+
+### 6.2 共通基盤要約テンプレート（TEMPLATE-common-summary.md）
+
+`survey/TEMPLATE-common-summary.md` として保存します。共通基盤の各単位の調査で、この表に行を追加していく形式です。
+
+要約は全単位が読み込むため、分量がそのままトークン消費に影響します。1行1クラス、各セルは1文以内を原則とし、全体で数百行程度に収まるようにしてください。共通基盤の調査後の確認時に、大きすぎる場合は重複する行をまとめます。
+
+この要約で最も重要なのは「業務側に提供しているもの」と「後続の調査への注意」です。業務クラスの調査では、共通基盤のソースを読まずにこの要約だけで判断するため、業務クラスのコードに現れる名前（メソッド名、属性名など）と、業務クラスからは見えない動作が書かれている必要があります。
+
+```markdown
+# 共通基盤 要約
+
+全調査単位がこのファイルを前提に調査する。1行1クラス、各セルは1文以内で簡潔に書く。
+既存の行は変更・削除せず、該当する表に行を追加する。
+
+## 1. クラス一覧
+| クラス（FQCN） | 種別 | 役割 | 利用しているSpring/SWF機能 | 業務側に提供しているもの | 置き換えの要点 | 調査単位 |
+|---|---|---|---|---|---|---|
+
+種別は次から選ぶ：基底クラス / ユーティリティ / フィルタ・リスナ / 設定 / 例外処理 / その他
+「業務側に提供しているもの」には、継承されるメソッド、呼び出されるメソッド、設定・参照される属性名などを、業務クラスのコードに現れる名前で書く。
+
+## 2. 横断的な仕組み
+| 仕組み | 実現しているクラス | 業務側での見え方（呼び出し方・継承の仕方） | 依存しているSpring/SWF機能 | 調査単位 |
+|---|---|---|---|---|
+
+例：サービスの取得（getBean のラッパー）、共通エラー処理、二重送信チェック、ログイン状態の確認、メッセージの取得
+
+## 3. 後続の調査への注意
+| 注意事項 | 根拠のクラス | 調査単位 |
+|---|---|---|
+
+例：「BaseAction を継承したクラスは、execute() の前後で自動的にトランザクションが開始・確定される」など、業務クラスのコードだけを見ても分からない暗黙の動作
 ```
 
 ---
